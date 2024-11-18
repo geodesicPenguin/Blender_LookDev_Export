@@ -1,0 +1,120 @@
+TODO:
+WE NEED AN IMPORTER THAT WILL BRING IN THE BAKED MATERIALS (?)
+the OBJECT needs uvs but the TEXTURE MAPPING doesnt! You can have projections set to OBJECT! (https://youtu.be/Se8GdHptD4A?si=MC6_EaKap7caN-EN&t=548)
+(to be imported as a static mesh, and the materials need to be imported as material instances ???)
+make render samples set to 10 - fast bake, same quality. ask user to use CPU or GPU compute
+if there is  metalness the bake may be all black
+make color space noncolor EXCEPT for diffuse
+use emit on bake
+WILL I NEED TO USE NORMAL SPACE FOR THE NORMAL MAP?
+
+A Blender script to export materials and lights for use in an alternative 3D software.
+This specific use case is for Blender to Unreal Engine.
+
+USE:
+The Blender lookdev artists need a process for transferring their fine-tuned set designs from Blender to Unreal.
+
+WHY:
+Different 3D programs do not transfer similar 3D assets as 1:1 objects.
+For example, a light exported from Blender with specific attributes set will not light the same exact scene the same way in Maya.
+These programs have different architecture underneath the hood that inform how the scene is displayed.
+There are solutions actively being produced to mitigate this issue, such as USD, there is still no one size fits all fix. 
+
+SOLUTION:
+A tool that will allow for different assets to be exported from Blender in a manner best suited for use in Unreal.
+________________________________________________________________________________________________________________________
+
+
+The tool will export 3 types of assets:
+1. Materials
+2. Lights
+3. Geometry
+
+The 3 export types will be in separate files, but they will all be in the same project folder structure.
+
+
+________________________________________
+THE 3 ASSETS:
+________________________________________
+
+MATERIALS
+When our artists lookdev, they are editing the materials via Blender's shader network system.
+To re-create this in Unreal would be a nightmare, as re-creating the same shader network would be duplicative work,
+but also a monotonous match-the-color game.
+
+We will be baking down the materials prior to export. That way, our Unreal artists will only need to import a singular texture map
+per channel and it will be 100% faithful to what the Blender artist intended. This will be non-destrcutive to the Blender artists,
+in case they make an edit to their work after it has already been exported for Unreal. 
+
+LIGHTS
+The lighting workflow in Blender is very intuitive, but many parameters set don't transfer well to Unreal.
+Some light settings in Blender have counterparts in Unreal, however they might not have the same attribute name.
+We will attempt to close the gap between each program's light systems in order to transfer a near-complete match.
+The result will never be 1:1, but it's closer than a full remake of the light setup in Unreal. 
+
+
+GEOMETRY
+This is literally just the mesh objects exported as FBX. 
+The material data will connect to the baked texture maps.
+
+
+EXAMPOLE BAKE CODE:import bpy
+# i guess the object must be selected, add this to the dict?
+# the IMG TEX node must also be selected
+def bake_all_materials():
+    # Set render engine to Cycles (required for baking)
+    bpy.context.scene.render.engine = 'CYCLES'
+    
+    # Get the active object
+    obj = bpy.context.active_object
+    
+    if obj is None or obj.type != 'MESH':
+        print("Please select a mesh object")
+        return
+    
+    # Create new image textures for each material ##### KEEP AN EYE ON THIS PART!!!!!!!!!! $$$$$$$$$
+    for mat in obj.data.materials:
+        if mat is None:
+            continue
+            
+        # Create a new image for baking
+        image_name = f"{mat.name}_baked"
+        bake_image = bpy.data.images.new(
+            name=image_name,
+            width=1024,  # Adjust resolution as needed
+            height=1024
+        )
+        
+        # Create a new texture node and assign the image
+        nodes = mat.node_tree.nodes
+        texture_node = nodes.new('ShaderNodeTexImage')
+        texture_node.image = bake_image
+        
+        # Select the nodes for baking
+        for node in nodes:
+            node.select = False
+        texture_node.select = True
+        nodes.active = texture_node
+        
+        # Bake the material
+        bpy.ops.object.bake(
+            type='DIFFUSE',  # Change type based on what you want to bake
+            pass_filter={'COLOR'},
+            use_selected_to_active=False,
+            margin=16
+        )
+        
+        # Save the baked image
+        bake_image.filepath_raw = f"//{image_name}.png"  # Adjust path as needed
+        bake_image.file_format = 'PNG'
+        bake_image.save()
+
+# Run the function
+bake_all_materials()
+
+
+# keeping for reference
+# https://docs.blender.org/api/current/bpy.ops.object.html#bpy.ops.object.bake
+# bpy.context.scene.render.bake.use_selected_to_active = True
+    bpy.context.scene.render.bake.margin = 16
+
