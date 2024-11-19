@@ -48,6 +48,13 @@ def getMaterialObjectFromName(materialName):
     return bpy.data.materials.get(materialName)
 
 
+def getNodeObjectFromName(nodeName, material):
+    """
+    Gets a Blender node object from its name.
+    """
+    return material.node_tree.nodes.get(nodeName)
+
+
 def getObjectsFromMaterial(material):
     """
     Retrieves all mesh objects that use the specified material.
@@ -77,35 +84,42 @@ def analyzeShaderConnections():
     Returns:
         dict: A dictionary where:
             - keys are material names (str)
-            - values are sets containing names of input channels (str) that have 
-              non-texture connections
+            - values are dictionaries where:
+                - keys are input channel names (str)
+                - values are tuples of (node_name, output_socket_name)
     
     Example:
         {
-            'Material.001': {'Base Color', 'Roughness'},
-            'Material.002': {'Metallic', 'Normal'}
+            'Material.001': {
+                'Base Color': ('RGB Curves.001', 'output_socket_name'),
+                'Roughness': ('Mix RGB.003', 'output_socket_name')
+            },
+            'Material.002': {
+                'Metallic': ('Value', 'output_socket_name'),
+                'Normal': ('Normal Map.001', 'output_socket_name')
+            }
         }
     """
     nonTextureInputs = {}
     materials = getAllMaterials()
         
     for material in materials:
-        bakeChannels = getBSDFBakeInputs(material)
-        bakeDisplacementChannel = getDisplacementBakeInputs(material)
+        bakeChannelData = getBSDFBakeInputs(material)
+        bakeDisplacementData = getDisplacementBakeInputs(material)
         
-        if bakeChannels or bakeDisplacementChannel:
-            # Initialize the set for this material
+        if bakeChannelData or bakeDisplacementData:
+            # Initialize the dictionary for this material
             if material.name not in nonTextureInputs:
-                nonTextureInputs[material.name] = set()
+                nonTextureInputs[material.name] = {}
             
-            # Update with both sets if they exist
-            if bakeChannels:
-                nonTextureInputs[material.name].update(bakeChannels)
-            if bakeDisplacementChannel:
-                nonTextureInputs[material.name].update(bakeDisplacementChannel)
-                
-            # Remove the material from the dictionary if there are no bake channels or a displacement channel input
-            if not bakeChannels and not bakeDisplacementChannel:
+            # Update with both dictionaries if they exist
+            if bakeChannelData:
+                nonTextureInputs[material.name].update(bakeChannelData)
+            if bakeDisplacementData:
+                nonTextureInputs[material.name].update(bakeDisplacementData)
+            
+            # Remove the material if it has no entries
+            if not nonTextureInputs[material.name]:
                 del nonTextureInputs[material.name]
             
     return nonTextureInputs
@@ -120,29 +134,32 @@ def getBSDFBakeInputs(material):
         material: A Blender material object
         
     Returns:
-        set: Set of input channel names that have non-texture connections
+        dict: A dictionary where:
+            - keys are input channel names (str)
+            - values are tuples of (node_name, output_socket_name)
     """
-    nodes = material.node_tree.nodes
-    principledNode = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None) # Finds the Principled BSDF node, stops after the first one (should only be one per material slot)
+    materialNodes = material.node_tree.nodes
+    principledNode = next((node for node in materialNodes if node.type == 'BSDF_PRINCIPLED'), None)
     
     if principledNode:
-        channelSet = set()
+        channelDict = {}
         
-        for input in principledNode.inputs:
-            if input.links:
-                connectedNode = input.links[0].from_node
+        for inputSocket in principledNode.inputs:
+            if inputSocket.links:
+                connectedNode = inputSocket.links[0].from_node
+                outputSocket = inputSocket.links[0].from_socket  # Get the output socket of the node going to the input
                 
                 # Special handling for the Normal channel
-                if input.name == 'Normal' and connectedNode.type == 'NORMAL_MAP':
+                if inputSocket.name == 'Normal' and connectedNode.type == 'NORMAL_MAP':
                     # Check if Normal Map node has a texture input
                     if not any(link.from_node.type == 'TEX_IMAGE' for link in connectedNode.inputs[1].links):
-                        channelSet.add(input.name)
+                        channelDict[inputSocket.name] = (connectedNode.name, outputSocket.name)
                 # For all other inputs
                 elif connectedNode.type != 'TEX_IMAGE':
-                    channelSet.add(input.name)
+                    channelDict[inputSocket.name] = (connectedNode.name, outputSocket.name)
         
-        return channelSet
-    return set() # Returns an empty set if no Principled BSDF node is found
+        return channelDict
+    return {}  # Returns an empty dict if no Principled BSDF node is found
 
 
 def getDisplacementBakeInputs(material):
@@ -153,26 +170,29 @@ def getDisplacementBakeInputs(material):
         material: A Blender material object
         
     Returns:
-        set: Set containing 'Displacement' if it has non-texture connection, empty set otherwise
+        dict: A dictionary where:
+            - keys are input channel names (str)
+            - values are tuples of (node_name, output_socket_name)
     """
-    nodes = material.node_tree.nodes
-    outputNode = next((node for node in nodes if node.type == 'OUTPUT_MATERIAL'), None) # Finds the Material Output node, stops after the first one (should only be one per material slot)
+    materialNodes = material.node_tree.nodes
+    outputNode = next((node for node in materialNodes if node.type == 'OUTPUT_MATERIAL'), None) # Finds the Material Output node, stops after the first one (should only be one per material slot)
     
     if outputNode:
-        channelSet = set()
+        channelDict = {}
         
         # Check displacement input
         dispInput = outputNode.inputs['Displacement']
         if dispInput.links:
             connectedNode = dispInput.links[0].from_node
+            outputSocket = dispInput.links[0].from_socket  # Get the output socket of the node going to the input
             
             if connectedNode.type == 'DISPLACEMENT':
                 # Check if Displacement node has a texture input
                 if not any(link.from_node.type == 'TEX_IMAGE' for link in connectedNode.inputs['Height'].links):
-                    channelSet.add('Displacement')
+                    channelDict['Displacement'] = (connectedNode.name, outputSocket.name)
                     
-        return channelSet
-    return set() # Returns an empty set if no Material Output node is found
+        return channelDict
+    return {}  # Returns an empty dict if no Material Output node is found
 
 
 def setBakeOptions(useGPU=True):
@@ -237,6 +257,25 @@ def setSelectedObjects(objects):
         obj.select_set(True)
         
         
+def selectNodeByName(nodeName, material):
+    """
+    Selects a node in the material's node tree by its name.
+    
+    Args:
+        nodeName (str): Name of the node to select
+        material (bpy.types.Material): Material containing the node
+    """
+    if nodeName in material.node_tree.nodes:
+        targetNode = material.node_tree.nodes[nodeName]
+        # Deselect all nodes first
+        for currentNode in material.node_tree.nodes:
+            currentNode.select = False
+        # Select and make active the target node
+        targetNode.select = True
+        material.node_tree.nodes.active = targetNode
+
+        
+        
 def bakeChannel(channel):
     """
     Bakes a single channel for the active object.
@@ -254,7 +293,8 @@ def bakeChannel(channel):
 def getBakeType(channel):
     """
     Maps material channels to their necessary bake types.
-    Emit is the default, as any map that is not a normal map can be baked with it.
+    EMIT is the default, as any map that is not a normal map can be baked with it.
+    Normal maps are baked with NORMAL, as they need the normal bake settings to bake correctly.
     
     Args:
         channel (str): The channel name from the Principled BSDF or Material Output if baking displacement
@@ -263,13 +303,40 @@ def getBakeType(channel):
         str: The corresponding Blender bake type
     """
     bake_types = {
-        'Normal': 'NORMAL',
+        'Normal': 'NORMAL'
     }
     return bake_types.get(channel, 'EMIT')  # Default to EMIT if channel not found
 
-def setBakeNetwork():
-    """_summary_
+
+def createBakeNetwork(materialName, nodeName, outputSocketName):
     """
+    Connects a specified node to the Material Output node's Surface input.
+    The node connected to the output node will be baked.
+    This is temporary, as we will connect the finished texture nodes to the BSDF node later.
+    
+    Args:
+        materialName (str): Name of the material containing the source node
+        nodeName (str): Name of the node to connect to the Material Output node
+        outputSocketName (str): Name of the output socket of the source node going to the material output node
+    """
+    # Get the material
+    material = bpy.data.materials.get(materialName)
+    if not material or not material.node_tree:
+        return False
+        
+    # Get the nodes
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    
+    materialOutputNode = next((node for node in nodes if node.type == 'OUTPUT_MATERIAL'), None) # Finds the Material Output node, stops after the first one (should only be one per material slot)
+    sourceNode = nodes.get(nodeName)
+    
+    # Clear existing connection to Surface input if any
+    for link in materialOutputNode.inputs['Surface'].links:
+        links.remove(link)
+    
+    # Make new connection
+    links.new(sourceNode.outputs[outputSocketName], materialOutputNode.inputs['Surface'])
 
 
 def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG'):
@@ -298,8 +365,8 @@ def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
     channelsToBake = analyzeShaderConnections()
     multipleUsers = {}
     
-    for materialName, channels in channelsToBake.items():
-        material = getMaterialObjectFromName(materialName)
+    for materialName, channelDict in channelsToBake.items():
+        material = getMaterialObjectFromName(materialName) # perhaps we dont make this a function
         objects = getObjectsFromMaterial(material)
         # If the material is assigned to multiple objects, add it to a data set to notify the user at the end
         if len(objects) > 1:
@@ -307,12 +374,15 @@ def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
             
         setSelectedObjects(objects)
             
-        for channel in channels:
-                bakeImage = createBakeImage(materialName, channel, resolution)
-                bakeImageNode = createBakeImageNode(material, bakeImage)
-                setBakeTextureNodeActive(material, bakeImageNode)
-                bakeChannel(channel)
-                saveChannelBake(bakeImage, material, channel, fileFormat)
+        for channel, (nodeName, outputSocketName) in channelDict.items():
+            bakeImage = createBakeImage(materialName, channel, resolution)
+            bakeImageNode = createBakeImageNode(material, bakeImage)
+            setBakeTextureNodeActive(material, bakeImageNode)
+            # Select the input node before baking
+            createBakeNetwork(materialName, nodeName, outputSocketName)
+            selectNodeByName(nodeName, material)
+            bakeChannel(channel)
+            saveChannelBake(bakeImage, material, channel, fileFormat)
                 
     # Notify the user if any materials were assigned to multiple objects
     if multipleUsers:
@@ -321,3 +391,6 @@ def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
             print(f'{material}: {objects}')
         
 bakeAllMaterials()
+
+# make another func thatll connect the finished bake node to the BSDF node
+# choose either to use the bpy objects or the names (if we use names, we will have to cast to the actual node object later)
