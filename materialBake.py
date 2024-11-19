@@ -29,8 +29,9 @@ def isValidMaterial(material):
     hasNodes = material.use_nodes
     hasUsers = material.users > 0
     isNotFake = not material.use_fake_user
+    isOnMesh = any(obj for obj in bpy.data.objects if obj.type == 'MESH' and material.name in obj.material_slots) # may want to use obj.data.materials instead of obj.material_slots
     
-    return hasNodes and hasUsers and isNotFake
+    return hasNodes and hasUsers and isNotFake and isOnMesh
 
 
 def getMaterialObjectFromName(materialName):
@@ -49,70 +50,71 @@ def getMaterialObjectFromName(materialName):
 
 def getObjectsFromMaterial(material):
     """
-    Retrieves all objects that use the specified material.
+    Retrieves all mesh objects that use the specified material.
     
     Args:
         material: A Blender material object
         
     Returns:
-        tuple: A tuple of Blender object objects that use this material
+        tuple: A tuple of Blender mesh objects that use this material
     """
-    objects = tuple(obj for obj in bpy.context.scene.objects if material in obj.data.materials)
+    objects = tuple(obj for obj in bpy.context.scene.objects if material.name in obj.material_slots and obj.type == 'MESH')
     
     return objects
 
 
 def analyzeShaderConnections():
     """
-    Analyzes materials and their associated objects to find non-texture inputs that need baking.
+    Analyzes all materials in the scene to find non-texture inputs connected to 
+    Principled BSDF nodes and displacement inputs connected to the Material Output node.
+    
+    This function examines each material's node tree, specifically looking at 
+    Principled BSDF nodes and Material Output nodes. It identifies input channels 
+    that have connections from nodes other than image texture nodes, or normal 
+    and displacement nodes connected to texture nodes.
+    
     
     Returns:
         dict: A dictionary where:
             - keys are material names (str)
-            - values are dictionaries containing:
-                - 'Objects': list of object names using this material
-                - 'Channels': list of input channels that need baking
+            - values are sets containing names of input channels (str) that have 
+              non-texture connections
     
     Example:
         {
-            'Material.001': {
-                'Objects': ['Cube', 'Sphere'],
-                'Channels': ['Base Color', 'Roughness']
-            }
+            'Material.001': {'Base Color', 'Roughness'},
+            'Material.002': {'Metallic', 'Normal'}
         }
     """
-    bakingData = {}
+    nonTextureInputs = {}
     materials = getAllMaterials()
-    
+        
     for material in materials:
         bakeChannels = getBSDFBakeInputs(material)
         bakeDisplacementChannel = getDisplacementBakeInputs(material)
         
-        # Combine both channel sets (displacement has to be done separately, since it's plugged directly into the material output node)
-        bakeChannels = set()
-        if bakeChannels:
-            bakeChannels.update(bakeChannels)
-        if bakeDisplacementChannel:
-            bakeChannels.update(bakeDisplacementChannel)
+        if bakeChannels or bakeDisplacementChannel:
+            # Initialize the set for this material
+            if material.name not in nonTextureInputs:
+                nonTextureInputs[material.name] = set()
             
-        # Only add to result if there are channels to bake
-        if bakeChannels:
-            # Get objects using this material
-            material_objects = getObjectsFromMaterial(material)
-            object_names = [obj.name for obj in material_objects]
+            # Update with both sets if they exist
+            if bakeChannels:
+                nonTextureInputs[material.name].update(bakeChannels)
+            if bakeDisplacementChannel:
+                nonTextureInputs[material.name].update(bakeDisplacementChannel)
+                
+            # Remove the material from the dictionary if there are no bake channels or a displacement channel input
+            if not bakeChannels and not bakeDisplacementChannel:
+                del nonTextureInputs[material.name]
             
-            bakingData[material.name] = {
-                'Objects': object_names,
-                'Channels': list(bakeChannels)
-            }
-    
-    return bakingData
+    return nonTextureInputs
 
 
 def getBSDFBakeInputs(material):
     """
-    Analyzes a single material to find non-texture inputs connected to its
-    Principled BSDF node.
+    Analyzes a single material to find image texture inputs connected to its
+    Principled BSDF node. If not found, we add the channel to the data set for baking.
     
     Args:
         material: A Blender material object
@@ -131,7 +133,7 @@ def getBSDFBakeInputs(material):
                 connectedNode = input.links[0].from_node
                 
                 # Special handling for the Normal channel
-                if input.name.lower() == 'normal' and connectedNode.type == 'NORMAL_MAP':
+                if input.name == 'Normal' and connectedNode.type == 'NORMAL_MAP':
                     # Check if Normal Map node has a texture input
                     if not any(link.from_node.type == 'TEX_IMAGE' for link in connectedNode.inputs[1].links):
                         channelSet.add(input.name)
@@ -145,9 +147,8 @@ def getBSDFBakeInputs(material):
 
 def getDisplacementBakeInputs(material):
     """
-    Analyzes a single material to find if its Material Output node has
-    a non-texture displacement input connected.
-    
+    Analyzes a single material to find if its Material Output node contains
+    an image texture displacement input connected. If not, we add it to the data set for baking.
     Args:
         material: A Blender material object
         
@@ -180,7 +181,6 @@ def setBakeOptions(useGPU=True):
     """
     bpy.context.scene.render.engine = 'CYCLES'
     bpy.context.scene.cycles.samples = 10 # Smaller sample size for faster baking. Negligible quality difference.
-    bpy.context.scene.render.bake.margin = 16
     
     if useGPU:
         bpy.context.scene.cycles.device = 'GPU'
@@ -188,20 +188,24 @@ def setBakeOptions(useGPU=True):
         bpy.context.scene.cycles.device = 'CPU'
         
         
-def createBakeImage(channel, resolution=1024):
+def createBakeImage(materialName, channel, resolution=1024):
     """
     Creates a new image texture and assigns it to the specified channel name.
     
+    Args:
+        materialName (str): The name of the material that the bake image belongs to
+        channel (str): The name of the channel to bake
+        resolution (int): The resolution of the bake image (default is 1024)
+        
     Returns:
         bpy.types.Image: The newly created image texture
     """
-    imageName = f"{channel}_baked"
+    imageName = f"{materialName}_{channel}_baked"
     bakeImage = bpy.data.images.new(
         name=imageName,
         width=resolution,  
         height=resolution
     )
-    
     return bakeImage
 
 
@@ -236,15 +240,39 @@ def setSelectedObjects(objects):
 def bakeChannel(channel):
     """
     Bakes a single channel for the active object.
+    
+    Args:
+        channel (str): The name of the channel to bake
     """
-    bpy.ops.object.bake(type=channel, 
-                        pass_filter={'COLOR'},
+    bakeType = getBakeType(channel) 
+    bpy.ops.object.bake(type=bakeType, 
+                        normal_space='TANGENT', # For normal maps, ignored otherwise
                         margin=16)
-                        # use_split_materials if multiple materials on 1 mesh
-                        # normal map settings in bake?
-    #bpy.context.scene.render.bake.normal_space = 'OBJECT'
+                        # use_split_materials if multiple materials on 1 mesh?
 
-def saveChannelBake(bakeImage, material, fileFormat='JPEG'):
+
+def getBakeType(channel):
+    """
+    Maps material channels to their necessary bake types.
+    Emit is the default, as any map that is not a normal map can be baked with it.
+    
+    Args:
+        channel (str): The channel name from the Principled BSDF or Material Output if baking displacement
+        
+    Returns:
+        str: The corresponding Blender bake type
+    """
+    bake_types = {
+        'Normal': 'NORMAL',
+    }
+    return bake_types.get(channel, 'EMIT')  # Default to EMIT if channel not found
+
+def setBakeNetwork():
+    """_summary_
+    """
+
+
+def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG'):
     """
     Saves the bake image to the specified path.
     
@@ -253,8 +281,8 @@ def saveChannelBake(bakeImage, material, fileFormat='JPEG'):
         material: The material that the bake image belongs to
         fileFormat: The file format to save the image as (default is JPEG)
     """
-    bakeImage.filepathRaw = f"C:/Users/Lucas/Desktop/dummy/{material.name}.{fileFormat}"
-    bakeImage.fileFormat = fileFormat
+    bakeImage.filepath_raw = f"C:/Users/Lucas/Desktop/dummy/{material.name}_{channel}.{fileFormat}"
+    bakeImage.file_format = fileFormat
     bakeImage.save()
 
 
@@ -270,23 +298,21 @@ def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
     channelsToBake = analyzeShaderConnections()
     multipleUsers = {}
     
-    for materialName, data in channelsToBake.items():
+    for materialName, channels in channelsToBake.items():
         material = getMaterialObjectFromName(materialName)
-        
-        for obj in data['Objects']:
-            # If the material is assigned to multiple objects, add it to a data set to notify the user at the end
-            if len(data['Objects']) > 1:
-                multipleUsers[material] = []
-                multipleUsers[material].append(obj)
+        objects = getObjectsFromMaterial(material)
+        # If the material is assigned to multiple objects, add it to a data set to notify the user at the end
+        if len(objects) > 1:
+            multipleUsers[materialName] = objects
             
-            setSelectedObjects(data['Objects'])
+        setSelectedObjects(objects)
             
-            for channel in data['Channels']:
-                bakeImage = createBakeImage(channel, resolution)
+        for channel in channels:
+                bakeImage = createBakeImage(materialName, channel, resolution)
                 bakeImageNode = createBakeImageNode(material, bakeImage)
                 setBakeTextureNodeActive(material, bakeImageNode)
                 bakeChannel(channel)
-                saveChannelBake(bakeImage, material, fileFormat)
+                saveChannelBake(bakeImage, material, channel, fileFormat)
                 
     # Notify the user if any materials were assigned to multiple objects
     if multipleUsers:

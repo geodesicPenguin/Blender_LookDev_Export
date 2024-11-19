@@ -115,6 +115,7 @@ bake_all_materials()
 
 # keeping for reference
 # https://docs.blender.org/api/current/bpy.ops.object.html#bpy.ops.object.bake
+# https://docs.blender.org/api/current/bpy.types.BakeSettings.html
 # bpy.context.scene.render.bake.use_selected_to_active = True
     bpy.context.scene.render.bake.margin = 16
 
