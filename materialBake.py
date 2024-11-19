@@ -2,7 +2,9 @@
 
 import bpy
 import os
-
+#notes:
+# make another func thatll connect the finished bake node to the BSDF node
+# choose either to use the bpy objects or the names (if we use names, we will have to cast to the actual node object later)
 
 def getAllMaterials():
     """
@@ -228,6 +230,11 @@ def createBakeImage(materialName, channel, resolution=1024):
     )
     return bakeImage
 
+def setSelectedBakeImageNode(material, bakeImageNode):
+    """
+    Sets the specified texture node as the active node for baking.
+    """
+    material.node_tree.nodes.active = bakeImageNode
 
 def createBakeImageNode(material, image):
     """
@@ -241,13 +248,6 @@ def createBakeImageNode(material, image):
     
     return textureNode
 
-
-def setBakeTextureNodeActive(material, bakeImageNode):
-    """
-    Sets the specified texture node as the active node for baking.
-    """
-    material.node_tree.nodes.active = bakeImageNode
-
      
 def setSelectedObjects(objects): 
     """
@@ -255,25 +255,6 @@ def setSelectedObjects(objects):
     """
     for obj in objects:
         obj.select_set(True)
-        
-        
-def selectNodeByName(nodeName, material):
-    """
-    Selects a node in the material's node tree by its name.
-    
-    Args:
-        nodeName (str): Name of the node to select
-        material (bpy.types.Material): Material containing the node
-    """
-    if nodeName in material.node_tree.nodes:
-        targetNode = material.node_tree.nodes[nodeName]
-        # Deselect all nodes first
-        for currentNode in material.node_tree.nodes:
-            currentNode.select = False
-        # Select and make active the target node
-        targetNode.select = True
-        material.node_tree.nodes.active = targetNode
-
         
         
 def bakeChannel(channel):
@@ -339,7 +320,7 @@ def createBakeNetwork(materialName, nodeName, outputSocketName):
     links.new(sourceNode.outputs[outputSocketName], materialOutputNode.inputs['Surface'])
 
 
-def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG'):
+def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG', exportDir=None):
     """
     Saves the bake image to the specified path.
     
@@ -347,50 +328,146 @@ def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG'):
         bakeImageNode: The texture node to save
         material: The material that the bake image belongs to
         fileFormat: The file format to save the image as (default is JPEG)
+        exportDir: The directory to save the image to (default is None, which will error if used)
     """
-    bakeImage.filepath_raw = f"C:/Users/Lucas/Desktop/dummy/{material.name}_{channel}.{fileFormat}"
+    bakeImage.filepath_raw = os.path.join(exportDir, f"{material.name}_{channel}.{fileFormat}")
     bakeImage.file_format = fileFormat
     bakeImage.save()
 
 
-def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
+# def handleMultipleUsers(material_name, objects, multiple_users_dict):
+#     """Tracks materials that are used by multiple objects."""
+#     if len(objects) > 1:
+#         multiple_users_dict[material_name] = objects
+
+# def printMultipleUserWarnings(multiple_users):
+#     """Prints warnings for materials used by multiple objects."""
+#     if multiple_users:
+#         print('#'*10, 'Materials assigned to multiple objects:', '#'*10, sep='\n')
+#         for material, objects in multiple_users.items():
+#             print(f'{material}: {objects}')
+
+
+def setupBakeEnvironment(material_name):
+    """Prepares the scene for baking a specific material."""
+    material = getMaterialObjectFromName(material_name)
+    objects = getObjectsFromMaterial(material)
+    setSelectedObjects(objects)
+    return material #change this later, i dislike that we have to return the material here
+
+
+def processBakeChannel(material, material_name, channel, node_data, resolution, fileFormat):
+    """Processes a single channel for baking."""
+    node_name, output_socket_name = node_data
+    
+    # Create and setup nodes
+    bake_image = createBakeImage(material_name, channel, resolution)
+    bake_image_node = createBakeImageNode(material, bake_image)
+    
+    # Setup bake network and execute bake
+    createBakeNetwork(material_name, node_name, output_socket_name)
+    setSelectedBakeImageNode(material, bake_image_node)
+    bakeChannel(channel)
+    
+    # Save the result
+    exportMaterialDir = exportMaterialDirectory(material_name)
+    saveChannelBake(bake_image, material, channel, fileFormat, exportMaterialDir)
+
+
+def bakeAllMaterials(resolution=1024, file_format='JPEG'):
     """
     Bakes all materials in the scene.
     
     Args:
         resolution: The resolution of the bake images (default is 1024)
-        fileFormat: The file format to save the images as (default is JPEG)
+        file_format: The file format to save the images as (default is JPEG)
     """
+    saveScene()
     setBakeOptions()
-    channelsToBake = analyzeShaderConnections()
-    multipleUsers = {}
+    channels_to_bake = analyzeShaderConnections()
+    multiple_users = {}
     
-    for materialName, channelDict in channelsToBake.items():
-        material = getMaterialObjectFromName(materialName) # perhaps we dont make this a function
-        objects = getObjectsFromMaterial(material)
-        # If the material is assigned to multiple objects, add it to a data set to notify the user at the end
-        if len(objects) > 1:
-            multipleUsers[materialName] = objects
-            
-        setSelectedObjects(objects)
-            
-        for channel, (nodeName, outputSocketName) in channelDict.items():
-            bakeImage = createBakeImage(materialName, channel, resolution)
-            bakeImageNode = createBakeImageNode(material, bakeImage)
-            setBakeTextureNodeActive(material, bakeImageNode)
-            # Select the input node before baking
-            createBakeNetwork(materialName, nodeName, outputSocketName)
-            selectNodeByName(nodeName, material)
-            bakeChannel(channel)
-            saveChannelBake(bakeImage, material, channel, fileFormat)
-                
-    # Notify the user if any materials were assigned to multiple objects
-    if multipleUsers:
-        print('#'*10, 'Materials assigned to multiple objects:', '#'*10, sep='\n')
-        for material, objects in multipleUsers.items():
-            print(f'{material}: {objects}')
+    # Process each material
+    for material_name, channel_dict in channels_to_bake.items():
+        # Setup environment
+        material = setupBakeEnvironment(material_name)
         
+        # Process each channel
+        for channel, node_data in channel_dict.items():
+            processBakeChannel(material, material_name, channel, node_data, 
+                             resolution, file_format)
+            
+    saveSceneBackup()
+            
+            
+def exportDirectory():
+    """
+    Creates a new directory for the export.
+    """
+    current_path = bpy.data.filepath
+    dir_path = os.path.dirname(current_path)
+    export_dir = os.path.join(dir_path, "scene_export")
+    os.makedirs(export_dir, exist_ok=True)
+    return export_dir
+
+
+def exportMaterialDirectory(material_name):
+    """
+    Creates a new directory for the export of a specific material.
+    """
+    export_dir = exportDirectory()
+    material_dir = os.path.join(export_dir, material_name)
+    os.makedirs(material_dir, exist_ok=True)
+    return material_dir
+
+
+# def exportMaterialFilepath(material_name, channel, file_format, exportDir):
+#     """
+#     Creates a filepath for the export.
+#     """
+#     export_path = os.path.join(exportDir, f"{material_name}_{channel}.{file_format}")
+#     return export_path
+            
+
+def saveScene():
+    """
+    Saves the current Blender scene.
+    
+    Returns:
+        bool: True if save was successful, False otherwise
+    """
+    # Check if file has been saved before
+    if not bpy.data.filepath:
+        bpy.ops.wm.save_as_mainfile('INVOKE_DEFAULT')
+        # Return True since the save dialog is handled by Blender
+        return True
+        
+    try:
+        bpy.ops.wm.save_mainfile()
+        return True
+    except Exception as e:
+        print(f"Error saving file: {str(e)}")
+        return False
+    
+
+def saveSceneBackup():
+    """Saves current file to scene_export subfolder."""
+    current_path = bpy.data.filepath
+    if not current_path:
+        return False
+        
+    exportDir = exportDirectory()
+    
+    current_file_name = os.path.splitext(os.path.basename(current_path))[0]
+    new_file_name = f"{current_file_name}_BAKED.blend"
+    new_path = os.path.join(exportDir, new_file_name)
+    bpy.ops.wm.save_as_mainfile(filepath=new_path)
+    return True
+
+
+
+
+
+# NOTE: This will automatically save the scene as a backup before baking with no warning. (can be changed later)
 bakeAllMaterials()
 
-# make another func thatll connect the finished bake node to the BSDF node
-# choose either to use the bpy objects or the names (if we use names, we will have to cast to the actual node object later)
