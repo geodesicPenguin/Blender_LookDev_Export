@@ -348,86 +348,100 @@ def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG', exportDir=N
 #             print(f'{material}: {objects}')
 
 
-def setupBakeEnvironment(material_name):
+def setupBakeEnvironment(materialName):
     """Prepares the scene for baking a specific material."""
-    material = getMaterialObjectFromName(material_name)
+    material = getMaterialObjectFromName(materialName)
     objects = getObjectsFromMaterial(material)
     setSelectedObjects(objects)
     return material #change this later, i dislike that we have to return the material here
 
 
-def processBakeChannel(material, material_name, channel, node_data, resolution, fileFormat):
+def isFileFormatValid(fileFormat):
+    """Checks if the file format is valid.
+    
+    Args:
+        fileFormat (str): The file format to check
+        
+    Returns:
+        bool: True if the file format is valid, False otherwise
+    """
+    return fileFormat in ['JPEG', 'PNG', 'TIFF', 'Targa']
+
+
+def processBakeChannel(material, materialName, channel, nodeData, resolution, fileFormat):
     """Processes a single channel for baking."""
-    node_name, output_socket_name = node_data
+    nodeName, outputSocketName = nodeData
     
     # Create and setup nodes
-    bake_image = createBakeImage(material_name, channel, resolution)
-    bake_image_node = createBakeImageNode(material, bake_image)
+    bakeImage = createBakeImage(materialName, channel, resolution)
+    bakeImageNode = createBakeImageNode(material, bakeImage)
     
     # Setup bake network and execute bake
-    createBakeNetwork(material_name, node_name, output_socket_name)
-    setSelectedBakeImageNode(material, bake_image_node)
+    createBakeNetwork(materialName, nodeName, outputSocketName)
+    setSelectedBakeImageNode(material, bakeImageNode)
     bakeChannel(channel)
     
     # Save the result
-    exportMaterialDir = exportMaterialDirectory(material_name)
-    saveChannelBake(bake_image, material, channel, fileFormat, exportMaterialDir)
+    exportMaterialDir = exportMaterialDirectory(materialName)
+    saveChannelBake(bakeImage, material, channel, fileFormat, exportMaterialDir)
+    
+    # Connect the baked texture to its corresponding input
+    connectBakedTexture(material, bakeImageNode, channel)
+    connectBSDFToMaterialOutput(material)
 
 
-def bakeAllMaterials(resolution=1024, file_format='JPEG'):
+
+def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
     """
     Bakes all materials in the scene.
     
     Args:
         resolution: The resolution of the bake images (default is 1024)
-        file_format: The file format to save the images as (default is JPEG)
+        fileFormat: The file format to save the images as (default is JPEG)
     """
+    if not isFileFormatValid(fileFormat):
+        raise ValueError(f"Invalid file format: {fileFormat}")
+    
     saveScene()
     setBakeOptions()
-    channels_to_bake = analyzeShaderConnections()
-    multiple_users = {}
+    channelsToBake = analyzeShaderConnections()
+    multipleUsers = {}
     
     # Process each material
-    for material_name, channel_dict in channels_to_bake.items():
+    for materialName, channelDict in channelsToBake.items():
         # Setup environment
-        material = setupBakeEnvironment(material_name)
+        material = setupBakeEnvironment(materialName)
         
         # Process each channel
-        for channel, node_data in channel_dict.items():
-            processBakeChannel(material, material_name, channel, node_data, 
-                             resolution, file_format)
+        for channel, nodeData in channelDict.items():
+            processBakeChannel(material, materialName, channel, nodeData, 
+                             resolution, fileFormat)
             
     saveSceneBackup()
             
+      
+      
             
 def exportDirectory():
     """
     Creates a new directory for the export.
     """
-    current_path = bpy.data.filepath
-    dir_path = os.path.dirname(current_path)
-    export_dir = os.path.join(dir_path, "scene_export")
-    os.makedirs(export_dir, exist_ok=True)
-    return export_dir
+    currentPath = bpy.data.filepath
+    dirPath = os.path.dirname(currentPath)
+    exportDir = os.path.join(dirPath, "scene_export")
+    os.makedirs(exportDir, exist_ok=True)
+    return exportDir
 
 
-def exportMaterialDirectory(material_name):
+def exportMaterialDirectory(materialName):
     """
     Creates a new directory for the export of a specific material.
     """
-    export_dir = exportDirectory()
-    material_dir = os.path.join(export_dir, material_name)
-    os.makedirs(material_dir, exist_ok=True)
-    return material_dir
+    exportDir = exportDirectory()
+    materialDir = os.path.join(exportDir, materialName)
+    os.makedirs(materialDir, exist_ok=True)
+    return materialDir
 
-
-# def exportMaterialFilepath(material_name, channel, file_format, exportDir):
-#     """
-#     Creates a filepath for the export.
-#     """
-#     export_path = os.path.join(exportDir, f"{material_name}_{channel}.{file_format}")
-#     return export_path
-            
 
 def saveScene():
     """
@@ -452,22 +466,62 @@ def saveScene():
 
 def saveSceneBackup():
     """Saves current file to scene_export subfolder."""
-    current_path = bpy.data.filepath
-    if not current_path:
+    currentPath = bpy.data.filepath
+    if not currentPath:
         return False
         
     exportDir = exportDirectory()
     
-    current_file_name = os.path.splitext(os.path.basename(current_path))[0]
-    new_file_name = f"{current_file_name}_BAKED.blend"
-    new_path = os.path.join(exportDir, new_file_name)
-    bpy.ops.wm.save_as_mainfile(filepath=new_path)
+    currentFileName = os.path.splitext(os.path.basename(currentPath))[0]
+    newFileName = f"{currentFileName}_BAKED.blend"
+    newPath = os.path.join(exportDir, newFileName)
+    bpy.ops.wm.save_as_mainfile(filepath=newPath)
     return True
 
 
 
 
+def connectBakedTexture(material, bakeImageNode, channel):
+    """
+    Connects a baked texture node to its corresponding input on the material.
+    
+    Args:
+        material: The material containing the nodes
+        bakeImageNode: The image texture node containing the baked result
+        channel: The channel name to connect to (e.g., 'Base Color', 'Normal', etc.)
+    """
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    
+    # Get the main shader nodes
+    principledNode = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
+    outputNode = next((node for node in nodes if node.type == 'OUTPUT_MATERIAL'), None)
+    
+    # Handle special cases
+    if channel == 'Normal':
+        normalMapNode = nodes.new('ShaderNodeNormalMap')
+        normalMapNode.location = (bakeImageNode.location.x + 300, bakeImageNode.location.y)
+        links.new(bakeImageNode.outputs['Color'], normalMapNode.inputs['Color'])
+        links.new(normalMapNode.outputs['Normal'], principledNode.inputs['Normal'])
+        
+    elif channel == 'Displacement':
+        dispNode = nodes.new('ShaderNodeDisplacement')
+        dispNode.location = (bakeImageNode.location.x + 300, bakeImageNode.location.y)
+        links.new(bakeImageNode.outputs['Color'], dispNode.inputs['Height'])
+        links.new(dispNode.outputs['Displacement'], outputNode.inputs['Displacement'])
+        
+    # All other channels connect directly to BSDF
+    elif channel in principledNode.inputs:
+        links.new(bakeImageNode.outputs['Color'], principledNode.inputs[channel])
+        
+def connectBSDFToMaterialOutput(material):
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    principledNode = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
+    outputNode = next((node for node in nodes if node.type == 'OUTPUT_MATERIAL'), None)
+    links.new(principledNode.outputs['BSDF'], outputNode.inputs['Surface'])
 
-# NOTE: This will automatically save the scene as a backup before baking with no warning. (can be changed later)
-bakeAllMaterials()
+#make function to delete all OLD nodes from shader networks
 
+# NOTE: make FBX export function (separate py file?)
+# TEST OUT shader network made for DISPLACEMENT and NORMAL
