@@ -50,12 +50,6 @@ def getMaterialObjectFromName(materialName):
     return bpy.data.materials.get(materialName)
 
 
-def getNodeObjectFromName(nodeName, material):
-    """
-    Gets a Blender node object from its name.
-    """
-    return material.node_tree.nodes.get(nodeName)
-
 
 def getObjectsFromMaterial(material):
     """
@@ -197,7 +191,7 @@ def getDisplacementBakeInputs(material):
     return {}  # Returns an empty dict if no Material Output node is found
 
 
-def setBakeOptions(useGPU=True):
+def setBakeRenderOptions(useGPU=True):
     """
     Sets the bake options for the current scene.
     """
@@ -230,32 +224,28 @@ def createBakeImage(materialName, channel, resolution=1024):
     )
     return bakeImage
 
-def setSelectedBakeImageNode(material, bakeImageNode):
+
+def setSelectedBakeImageNode(materialName, bakeImageNode):
     """
     Sets the specified texture node as the active node for baking.
     """
+    material = getMaterialObjectFromName(materialName)
     material.node_tree.nodes.active = bakeImageNode
+    
 
-def createBakeImageNode(material, image):
+def createBakeImageNode(materialName, image):
     """
     Creates a new image texture node and assigns it to the specified image.
     
     Returns:
         bpy.types.ShaderNodeTexImage: The newly created image texture node
     """
+    material = getMaterialObjectFromName(materialName)
     textureNode = material.node_tree.nodes.new('ShaderNodeTexImage')
     textureNode.image = image
     
     return textureNode
 
-     
-def setSelectedObjects(objects): 
-    """
-    Selects all given objects in the current scene.
-    """
-    for obj in objects:
-        obj.select_set(True)
-        
         
 def bakeChannel(channel):
     """
@@ -301,7 +291,7 @@ def createBakeNetwork(materialName, nodeName, outputSocketName):
         outputSocketName (str): Name of the output socket of the source node going to the material output node
     """
     # Get the material
-    material = bpy.data.materials.get(materialName)
+    material = getMaterialObjectFromName(materialName)
     if not material or not material.node_tree:
         return False
         
@@ -320,17 +310,18 @@ def createBakeNetwork(materialName, nodeName, outputSocketName):
     links.new(sourceNode.outputs[outputSocketName], materialOutputNode.inputs['Surface'])
 
 
-def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG', exportDir=None):
+def saveChannelBake(bakeImage, materialName, channel, fileFormat='JPEG', exportDir=None):
     """
     Saves the bake image to the specified path.
     
     Args:
         bakeImageNode: The texture node to save
-        material: The material that the bake image belongs to
+        materialName: The name of the material that the bake image belongs to
+        channel: The name of the channel to save
         fileFormat: The file format to save the image as (default is JPEG)
         exportDir: The directory to save the image to (default is None, which will error if used)
     """
-    bakeImage.filepath_raw = os.path.join(exportDir, f"{material.name}_{channel}.{fileFormat}")
+    bakeImage.filepath_raw = os.path.join(exportDir, f"{materialName}_{channel}.{fileFormat}")
     bakeImage.file_format = fileFormat
     bakeImage.save()
 
@@ -348,13 +339,17 @@ def saveChannelBake(bakeImage, material, channel, fileFormat='JPEG', exportDir=N
 #             print(f'{material}: {objects}')
 
 
-def setupBakeEnvironment(materialName):
-    """Prepares the scene for baking a specific material."""
+def selectBakeObjects(materialName):
+    """Selects the objects to bake from.
+    
+    Args:
+        materialName (str): The name of the material to select objects from
+    """
     material = getMaterialObjectFromName(materialName)
     objects = getObjectsFromMaterial(material)
-    setSelectedObjects(objects)
-    return material #change this later, i dislike that we have to return the material here
-
+    for obj in objects:
+        obj.select_set(True)
+        
 
 def isFileFormatValid(fileFormat):
     """Checks if the file format is valid.
@@ -368,28 +363,30 @@ def isFileFormatValid(fileFormat):
     return fileFormat in ['JPEG', 'PNG', 'TIFF', 'Targa']
 
 
-def processBakeChannel(material, materialName, channel, nodeData, resolution, fileFormat):
+def setupBake(materialName, channel, nodeData, resolution, fileFormat):
     """Processes a single channel for baking."""
     nodeName, outputSocketName = nodeData
     
     # Create and setup nodes
     bakeImage = createBakeImage(materialName, channel, resolution)
-    bakeImageNode = createBakeImageNode(material, bakeImage)
+    bakeImageNode = createBakeImageNode(materialName, bakeImage) 
+    
+    # Select the required objects to bake from
+    selectBakeObjects(materialName)
     
     # Setup bake network and execute bake
     createBakeNetwork(materialName, nodeName, outputSocketName)
-    setSelectedBakeImageNode(material, bakeImageNode)
+    setSelectedBakeImageNode(materialName, bakeImageNode)
     bakeChannel(channel)
     
     # Save the result
     exportMaterialDir = exportMaterialDirectory(materialName)
-    saveChannelBake(bakeImage, material, channel, fileFormat, exportMaterialDir)
+    saveChannelBake(bakeImage, materialName, channel, fileFormat, exportMaterialDir)
     
     # Connect the baked texture to its corresponding input
-    connectBakedTexture(material, bakeImageNode, channel)
-    connectBSDFToMaterialOutput(material)
-
-
+    connectBakedTexture(materialName, bakeImageNode, channel)
+    connectBSDFToMaterialOutput(materialName)
+    
 
 def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
     """
@@ -403,28 +400,28 @@ def bakeAllMaterials(resolution=1024, fileFormat='JPEG'):
         raise ValueError(f"Invalid file format: {fileFormat}")
     
     saveScene()
-    setBakeOptions()
+    setBakeRenderOptions()
     channelsToBake = analyzeShaderConnections()
     multipleUsers = {}
     
     # Process each material
     for materialName, channelDict in channelsToBake.items():
-        # Setup environment
-        material = setupBakeEnvironment(materialName)
-        
         # Process each channel
         for channel, nodeData in channelDict.items():
-            processBakeChannel(material, materialName, channel, nodeData, 
+            setupBake(materialName, channel, nodeData, 
                              resolution, fileFormat)
             
     saveSceneBackup()
             
-      
+    
       
             
 def exportDirectory():
     """
     Creates a new directory for the export.
+    
+    Returns:
+        str: The path to the export directory
     """
     currentPath = bpy.data.filepath
     dirPath = os.path.dirname(currentPath)
@@ -436,6 +433,9 @@ def exportDirectory():
 def exportMaterialDirectory(materialName):
     """
     Creates a new directory for the export of a specific material.
+    
+    Returns:
+        str: The path to the export directory
     """
     exportDir = exportDirectory()
     materialDir = os.path.join(exportDir, materialName)
@@ -465,7 +465,11 @@ def saveScene():
     
 
 def saveSceneBackup():
-    """Saves current file to scene_export subfolder."""
+    """Saves current file to scene_export subfolder.
+    
+    Returns:
+        bool: True if save was successful, False otherwise
+    """
     currentPath = bpy.data.filepath
     if not currentPath:
         return False
@@ -481,15 +485,16 @@ def saveSceneBackup():
 
 
 
-def connectBakedTexture(material, bakeImageNode, channel):
+def connectBakedTexture(materialName, bakeImageNode, channel):
     """
     Connects a baked texture node to its corresponding input on the material.
     
     Args:
-        material: The material containing the nodes
+        materialName (str): The name of the material containing the nodes
         bakeImageNode: The image texture node containing the baked result
         channel: The channel name to connect to (e.g., 'Base Color', 'Normal', etc.)
     """
+    material = getMaterialObjectFromName(materialName)
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     
@@ -497,7 +502,7 @@ def connectBakedTexture(material, bakeImageNode, channel):
     principledNode = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
     outputNode = next((node for node in nodes if node.type == 'OUTPUT_MATERIAL'), None)
     
-    # Handle special cases
+    # Handle special cases for normal and displacement maps
     if channel == 'Normal':
         normalMapNode = nodes.new('ShaderNodeNormalMap')
         normalMapNode.location = (bakeImageNode.location.x + 300, bakeImageNode.location.y)
@@ -513,15 +518,18 @@ def connectBakedTexture(material, bakeImageNode, channel):
     # All other channels connect directly to BSDF
     elif channel in principledNode.inputs:
         links.new(bakeImageNode.outputs['Color'], principledNode.inputs[channel])
-        
-def connectBSDFToMaterialOutput(material):
+     
+
+def connectBSDFToMaterialOutput(materialName):
+    """
+    Connects the BSDF node to the Material Output node's Surface input.
+    """
+    material = getMaterialObjectFromName(materialName)
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     principledNode = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
     outputNode = next((node for node in nodes if node.type == 'OUTPUT_MATERIAL'), None)
     links.new(principledNode.outputs['BSDF'], outputNode.inputs['Surface'])
 
-#make function to delete all OLD nodes from shader networks
+#make function to delete all OLD nodes from shader networks?
 
-# NOTE: make FBX export function (separate py file?)
-# TEST OUT shader network made for DISPLACEMENT and NORMAL

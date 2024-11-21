@@ -1,18 +1,7 @@
 import bpy
-import materialBake
-import fbxExport
+from . import materialBake
+from . import fbxExport
 
-bl_info = {
-    "name": "Lookdev Export Tool",
-    "author": "Lucas Santos",
-    "version": (1, 0),
-    "blender": (4, 20, 0),
-    "location": "View3D > Toolbar > Lookdev",
-    "description": "Exports lookdev materials to a JSON file",
-    "warning": "",
-    "wiki_url": "",
-    "category": "Lookdev Export",
-}
 
 class LookdevPanel(bpy.types.Panel):
     """Creates a Panel in the 3D View"""
