@@ -21,12 +21,20 @@ class LookdevPanel(bpy.types.Panel):
 
         
 class LookDevBakeMaterials(bpy.types.Operator):
-    """Bake materials to a external file"""
+    """Bake materials to an external file"""
     bl_idname = 'lookdev.bake_materials'
     bl_label = 'Bake Materials'
     bl_options = {'REGISTER', 'UNDO'}
     
-    fileFormat : bpy.props.StringProperty(name='File Format', default='JPEG')
+    fileFormat : bpy.props.EnumProperty(
+        name='File Format',
+        items=[
+            ('JPEG', 'JPEG', ''),
+            ('PNG', 'PNG', ''),
+            ('TIFF', 'TIFF', '')
+        ],
+        default='JPEG'
+    )
     textureResolution : bpy.props.IntProperty(name='Texture Resolution', default=4096)
     
     

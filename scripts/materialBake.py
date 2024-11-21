@@ -412,28 +412,7 @@ def setupBake(materialName, channel, nodeData, resolution, fileFormat):
     # Setup bake network and execute bake
     createBakeNetwork(materialName, channel, nodeName, outputSocketName)
     setSelectedBakeImageNode(materialName, bakeImageNode)
-    
-    # Temporarily disconnect displacement for normal baking. We will restore it after baking. (The normal will not bake right if displacement is connected)
-    if channel == 'Normal':
-        material = getMaterialObjectFromName(materialName)
-        material_output = next(n for n in material.node_tree.nodes if n.type == 'OUTPUT_MATERIAL')
-        
-        # Store the current displacement connection if it exists
-        displacement_links = next((link for link in material.node_tree.links if link.to_socket == material_output.inputs['Displacement']), None)
-        if displacement_links:
-            from_socket = displacement_links.from_socket
-            material.node_tree.links.remove(displacement_links)
-        else:
-            from_socket = None
-            
-        bakeChannel(channel)
-    
-    # Restore displacement connection if it existed
-        if from_socket:
-            material.node_tree.links.new(from_socket, material_output.inputs['Displacement'])
-            
-    else:
-        bakeChannel(channel)
+    bakeChannel(channel)
     
     # Save the result
     exportMaterialDir = exportMaterialDirectory(materialName)
