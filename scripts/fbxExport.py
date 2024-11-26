@@ -5,7 +5,7 @@ import os
 
 def exportVisibleMeshesAsFbx(filepath=''):
     """
-    Export visible mesh objects as FBX with specific settings.
+    Export only visible mesh objects as FBX with specific settings.
     If no filepath is given, saves next to the open .blend file.
     
     Args:
@@ -14,10 +14,20 @@ def exportVisibleMeshesAsFbx(filepath=''):
     if not filepath:
         filepath = saveNextToCurrentFile()
 
+    # Deselect all objects first
+    bpy.ops.object.select_all(action='DESELECT')
+    
+    # Select only visible mesh objects
+    for obj in bpy.data.objects:
+        if (obj.type == 'MESH' and 
+            not obj.hide_viewport and 
+            not obj.hide_get()):
+            obj.select_set(True)
+
     # Export FBX with specific settings
     bpy.ops.export_scene.fbx(
         filepath=filepath,
-        use_visible=True,
+        use_selection=True,
         global_scale=1.0,
         apply_unit_scale=True,
         apply_scale_options='FBX_SCALE_NONE',
@@ -46,6 +56,9 @@ def exportVisibleMeshesAsFbx(filepath=''):
         use_batch_own_dir=False
     )
     
+    # Deselect all objects after export
+    bpy.ops.object.select_all(action='DESELECT')
+
 def saveNextToCurrentFile():
     """
     Saves the current file with a new name in the same directory.

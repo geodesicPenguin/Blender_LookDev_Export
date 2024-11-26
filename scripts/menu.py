@@ -47,9 +47,11 @@ class LookDevBakeMaterials(bpy.types.Operator):
     
     
     def execute(self, context):
+        print('Baking materials...')
         materialBake.bakeAllMaterials(self.textureResolution, self.fileFormat)
+        print('Exporting FBX...')
         fbxExport.exportVisibleMeshesAsFbx()
-        print('Baking materials...') # This does not work. Seems like nothing in this function prints.
+        print('Done! Materials and FBX exported.')
         return {'FINISHED'}
     
     def invoke(self, context, event):
