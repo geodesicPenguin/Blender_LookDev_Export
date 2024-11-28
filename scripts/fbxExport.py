@@ -3,7 +3,7 @@
 import bpy
 import os
 
-def exportVisibleMeshesAsFbx(filepath=''):
+def exportMeshesAndLightsAsFbx(filepath=''):
     """
     Export only visible mesh objects as FBX with specific settings.
     If no filepath is given, saves next to the open .blend file.
@@ -17,9 +17,9 @@ def exportVisibleMeshesAsFbx(filepath=''):
     # Deselect all objects first
     bpy.ops.object.select_all(action='DESELECT')
     
-    # Select only visible mesh objects
+    # Select only visible mesh and light objects
     for obj in bpy.data.objects:
-        if (obj.type == 'MESH' and 
+        if ((obj.type == 'MESH' or obj.type == 'LIGHT') and 
             not obj.hide_viewport and 
             not obj.hide_get()):
             obj.select_set(True)

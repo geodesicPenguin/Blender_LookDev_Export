@@ -2,15 +2,29 @@
 
 import bpy
 import os
-#notes:
-# make another func thatll connect the finished bake node to the BSDF node
-# choose either to use the bpy objects or the names (if we use names, we will have to cast to the actual node object later)
-
+import shutil
 
 
 class MaterialBaker:
-    def __init__(self):
-        pass
+    def __init__(self, resolution=1024, fileFormat='JPEG', copyTextures=False, exportDir=None):
+        """ 
+        Args:
+            resolution: The resolution of the bake images
+            fileFormat: The file format to save the images as
+            copyTextures: Whether to copy all image textures to the save location
+            exportDir: The directory to save the bake images to. If not specified, it will be in the blend file's directory.
+        """
+        self.nonTextureInputs = {} # Will store data for bake inputs that are not texture images
+        self.textureInputs = {} # Will store data for bake inputs that are texture images
+        
+        self.resolution = resolution # The resolution of the bake images
+        self.fileFormat = fileFormat # The file format to save the images as
+        
+        self.copyTextures = copyTextures # Whether to copy all image textures to the save location
+        
+        self.exportDir = exportDir if exportDir else self.dirNextToFile() # The directory to save the bake images to. If not specified, it will be in the blend file's directory.
+        
+        self.bakeAllMaterials() # Bake all materials
         
     def getAllMaterials(self):
         """
@@ -53,17 +67,17 @@ class MaterialBaker:
         """
         return bpy.data.materials.get(materialName)
 
-    def getObjectsFromMaterial(self, material):
+    def getObjectsFromMaterial(self, materialName):
         """
         Retrieves all mesh objects that use the specified material.
         
         Args:
-            material: A Blender material object
-            
+            materialName (str): The name of the material to find
+
         Returns:
             tuple: A tuple of Blender mesh objects that use this material
         """
-        objects = tuple(obj for obj in bpy.context.scene.objects if material.name in obj.material_slots and obj.type == 'MESH')
+        objects = tuple(obj for obj in bpy.context.scene.objects if materialName in obj.material_slots and obj.type == 'MESH')
         
         return objects
 
@@ -96,7 +110,8 @@ class MaterialBaker:
                 }
             }
         """
-        nonTextureInputs = {}
+        nonTextureInputs = self.nonTextureInputs
+        
         materials = self.getAllMaterials()
             
         for material in materials:
@@ -133,6 +148,7 @@ class MaterialBaker:
                 - keys are input channel names (str)
                 - values are tuples of (node_name, output_socket_name)
         """
+        textureInputs = self.textureInputs
         materialNodes = material.node_tree.nodes
         principledNode = next((node for node in materialNodes if node.type == 'BSDF_PRINCIPLED'), None)
         
@@ -154,8 +170,10 @@ class MaterialBaker:
                     # For all other inputs
                     if connectedNode.type != 'TEX_IMAGE':
                         channelDict[inputSocket.name] = (connectedNode.name, outputSocket.name)
-                    else:
-                        print(f"Texture image node {connectedNode.name} is connected to {inputSocket.name} input of {principledNode.name}")
+                    else: # If it does have a texture input, we add it to the texture inputs dictionary
+                        if material.name not in textureInputs:
+                            textureInputs[material.name] = {}   
+                        textureInputs[material.name][inputSocket.name] = (connectedNode.name, outputSocket.name)
             
             return channelDict
         return {}
@@ -172,6 +190,8 @@ class MaterialBaker:
                 - keys are input channel names (str)
                 - values are tuples of (node_name, output_socket_name)
         """
+        textureInputs = self.textureInputs
+        
         materialNodes = material.node_tree.nodes
         outputNode = next((node for node in materialNodes if node.type == 'OUTPUT_MATERIAL'), None)
         
@@ -188,6 +208,8 @@ class MaterialBaker:
                     # Check if Displacement node has a texture input
                     if not any(link.from_node.type == 'TEX_IMAGE' for link in connectedNode.inputs['Height'].links):
                         channelDict['Displacement'] = (connectedNode.name, outputSocket.name)
+                    else: # If it does have a texture input, we add it to the texture inputs dictionary
+                        textureInputs[material.name]['Displacement'] = (connectedNode.name, outputSocket.name)
                         
             return channelDict
         return {}
@@ -204,7 +226,7 @@ class MaterialBaker:
         else:
             bpy.context.scene.cycles.device = 'CPU'
             
-    def createBakeImage(self, materialName, channel, resolution=1024):
+    def createBakeImage(self, materialName, channel):
         """
         Creates a new image texture and assigns it to the specified channel name.
         
@@ -216,6 +238,8 @@ class MaterialBaker:
         Returns:
             bpy.types.Image: The newly created image texture
         """
+        resolution = self.resolution
+        
         imageName = f"{materialName}_{channel}_baked"
         bakeImage = bpy.data.images.new(
             name=imageName,
@@ -385,8 +409,7 @@ class MaterialBaker:
                 - keys are 'visible' and 'hidden'
                 - values are lists of object names
         """
-        material = self.getMaterialObjectFromName(materialName)
-        objects = self.getObjectsFromMaterial(material)
+        objects = self.getObjectsFromMaterial(materialName)
 
         bpy.ops.object.select_all(action='DESELECT')
         
@@ -404,22 +427,23 @@ class MaterialBaker:
             
         return objectData
 
-    def setupBake(self, materialName, channel, nodeData, resolution, fileFormat):
+    def setupBake(self, materialName, channel, nodeData):
         """Processes a single channel for baking.
         Args:
             materialName (str): The name of the material to bake
             channel (str): The name of the channel to bake
             nodeData (tuple): A tuple containing the node name and output socket name
-            resolution (int): The resolution of the bake image
-            fileFormat (str): The file format to save the image as
             
         Returns:
             bool: True if the bake was successful, False otherwise
         """
+        resolution = self.resolution
+        fileFormat = self.fileFormat
+        
         nodeName, outputSocketName = nodeData
         
         # Create and setup nodes
-        bakeImage = self.createBakeImage(materialName, channel, resolution)
+        bakeImage = self.createBakeImage(materialName, channel)
         bakeImageNode = self.createBakeImageNode(materialName, bakeImage) 
         
         # Select the required objects to bake from 
@@ -455,31 +479,36 @@ class MaterialBaker:
             
         return isSuccess
 
-    def bakeAllMaterials(self, resolution=1024, fileFormat='JPEG'):
+    def bakeAllMaterials(self):
         """
         Bakes all materials in the scene.
-        
-        Args:
-            resolution: The resolution of the bake images (default is 1024)
-            fileFormat: The file format to save the images as (default is JPEG)
         """
-        if not self.isFileFormatValid(fileFormat):
-            raise ValueError(f"Invalid file format: {fileFormat}")
+        if not self.isFileFormatValid(self.fileFormat):
+            raise ValueError(f"Invalid file format: {self.fileFormat}")
+        
         self.toggleSystemConsole()
         self.saveScene()
         self.saveSceneBackup()
         self.setBakeRenderOptions()
-        channelsToBake = self.analyzeShaderConnections()
+        
+        self.analyzeShaderConnections()
+        channelsToBake = self.nonTextureInputs
+        channelsToCopy = self.textureInputs
+        
         multipleUsers = {}
         
         # Process each material
         failedMaterials = []
         for materialName, channelDict in channelsToBake.items():
-            print('\n'*5,materialName, channelDict,'\n'*5,sep='')
+            # Check if the material is used by multiple objects
+            objects = self.getObjectsFromMaterial(materialName)
+            if len(objects) > 1:
+                multipleUsers[materialName] = [obj.name for obj in objects]
+                
+            print('\n'*5,materialName, channelDict,'\n'*5, sep=' | ')
             # Process each channel
             for channel, nodeData in channelDict.items():
-                isSuccess = self.setupBake(materialName, channel, nodeData, 
-                                 resolution, fileFormat)
+                isSuccess = self.setupBake(materialName, channel, nodeData)
             if isSuccess:
                 # Connect the BSDF node to the Material Output node after all channels are baked. 
                 self.connectBSDFToMaterialOutput(materialName)
@@ -487,12 +516,23 @@ class MaterialBaker:
                 print(f"Error baking {materialName}")
                 failedMaterials.append(materialName)
                 
-        if failedMaterials:
-            print('\n'*3, 'Failed materials:', failedMaterials, '\n'*3, sep='')
-            showMessage('Some materials failed to bake (Check console)', 'ERROR')
+        # Copy the textures to the material directory
+        if self.copyTextures:
+            for materialName, textureData in channelsToCopy.items():
+                self.copyTextureToDirectory(materialName, textureData)
+             
+        if multipleUsers:
+            print('\n'*3, 'Materials with multiple users:', *multipleUsers, *multipleUsers.values(), '\n', '\nIf the UVs are not identical, you may get strange results.', '\n'*3, sep='\n')
+            self.showMessage('Some materials baked onto multiple objects (Check console)', 'ERROR')
+        elif failedMaterials and multipleUsers:
+            print('\n'*3, 'Failed materials:', *failedMaterials, '\n'*3, 'Materials with multiple users:', *multipleUsers, *multipleUsers.values(), '\n', '\nIf the UVs are not identical, you may get strange results.','\n'*3, sep=' ')
+            self.showMessage('Some materials failed to bake or had issues with multiple users (Check console)', 'ERROR')
+        elif failedMaterials:
+            print('\n'*3, 'Failed materials:', *failedMaterials, '\n'*3, sep='')
+            self.showMessage('Some materials failed to bake (Check console)', 'ERROR')
         else:
             print('\n'*3, 'All materials baked successfully', '\n'*3, sep='')
-            showMessage('All materials baked successfully', 'INFO')
+            self.showMessage('All materials baked successfully', 'INFO')
             
         # Save the new scene after baking
         self.saveScene()
@@ -573,7 +613,7 @@ class MaterialBaker:
         if not currentPath:
             return False
             
-        exportDir = self.exportDirectory()
+        exportDir = self.exportDir
         
         currentFileName = os.path.splitext(os.path.basename(currentPath))[0]
         newFileName = f"{currentFileName}_BAKED.blend"
@@ -581,18 +621,17 @@ class MaterialBaker:
         bpy.ops.wm.save_as_mainfile(filepath=newPath)
         return True
 
-    def exportDirectory(self):
+    def dirNextToFile(self):
         """
-        Creates a new directory for the export.
+        Creates a new directory for the export next to the blend file.
         
         Returns:
             str: The path to the export directory
         """
-        currentPath = bpy.data.filepath
-        dirPath = os.path.dirname(currentPath)
-        exportDir = os.path.join(dirPath, "scene_export")
-        os.makedirs(exportDir, exist_ok=True)
-        return exportDir
+        dirPath = bpy.path.abspath('//')
+        sceneExportDir = os.path.join(dirPath, "scene_export")
+        os.makedirs(sceneExportDir, exist_ok=True)
+        return sceneExportDir
 
     def exportMaterialDirectory(self, materialName):
         """
@@ -604,43 +643,52 @@ class MaterialBaker:
         Returns:
             str: The path to the export directory
         """
+        exportDir = self.exportDir
+        
         materialName = materialName.rstrip().replace(' ', '_')
         
-        exportDir = self.exportDirectory()
         materialDir = os.path.join(exportDir, materialName)
         os.makedirs(materialDir, exist_ok=True)
         return materialDir
-
-
-
-
-
-
-
-
-
-
-class MyOperator(bpy.types.Operator):
-    bl_idname = "object.my_operator"
-    bl_label = "My Operator"
     
-    def execute(self, context):
-        # Different message types: INFO, WARNING, ERROR
-        self.report({'INFO'}, "Operation completed successfully")
-        self.report({'ERROR'}, "Something went wrong")
-        return {'FINISHED'}
-    
-def showMessage(message, type='INFO'):
-    """
-    Shows a message in the Blender interface.
-    
-    Args:
-        message (str): The message to display
-        type (str): Message type ('INFO' or 'ERROR')
-    """
-    def draw(self, context):
-        self.layout.label(text=message)
-    
-    bpy.context.window_manager.popup_menu(draw, title="Message", icon=type)
+    def copyTextureToDirectory(self, materialName, textureInputs):
+        """
+        Copies the texture images to the export directory.
+        
+        Args:
+            materialName (str): The name of the material containing the textures
+            textureInputs (dict): Dictionary mapping texture names to (node_name, socket_name) tuples
+            
+        Returns:
+            str: The path to the copied texture
+        """
+        materialDir = self.exportMaterialDirectory(materialName)
+        
+        for textureName, textureData in textureInputs.items():
+            textureNodeName, textureOutputSocketName = textureData
+            material = self.getMaterialObjectFromName(materialName)
+            textureNode = material.node_tree.nodes.get(textureNodeName)
+            
+            if textureNode and textureNode.image:
+                imagePath = bpy.path.abspath(textureNode.image.filepath)
+                if os.path.exists(imagePath):
+                    fileName = os.path.basename(imagePath)
+                    newPath = os.path.join(materialDir, fileName)
+                    shutil.copy2(imagePath, newPath)
+        return newPath
+
+
+    def showMessage(self, message, type='INFO'):
+        """
+        Shows a message in the Blender interface.
+        
+        Args:
+            message (str): The message to display
+            type (str): Message type ('INFO' or 'ERROR')
+        """
+        def draw(self, context):
+            self.layout.label(text=message)
+        
+        bpy.context.window_manager.popup_menu(draw, title="Message", icon=type)
     
     

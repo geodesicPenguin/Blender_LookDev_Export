@@ -9,67 +9,109 @@ class LookdevPanel(bpy.types.Panel):
     bl_idname = 'VIEW3D_PT_lookdev_export'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Lookdev'
+    bl_category = 'Lookdev' # This will be the tab name in the sidebar
     
     def draw(self, context):
         layout = self.layout
+        props = context.scene.ui_properties
         
-        row = layout.row()
-        row.label(text='Export Scene Lookdev', icon = 'IMAGE')
-        row = layout.row()
-        row.operator('lookdev.bake_materials',icon='CUBE', text='Bake Scene Materials and Save FBX')
+        layout.scale_y = 1.2
+        
+        layout.label(text='Bake and Export Materials')
+        box = layout.box()
+        
+        box.prop(props, "textureResolution")
+        box.prop(props, "fileFormat")
+        box.prop(props, "isCopyingTextures")
+        box.prop(props, "isExportingFBX")
+        box.prop(props, "isDefaultExportLocation")
 
         
-class LookDevBakeMaterials(bpy.types.Operator):
-    """Bake materials to an external file"""
-    bl_idname = 'lookdev.bake_materials'
-    bl_label = 'Bake Materials'
-    bl_options = {'REGISTER', 'UNDO'}
+        # Only enable filePath if not using default location
+        row = box.row()
+        row.enabled = not props.isDefaultExportLocation
+        row.prop(props, "filePath")
+        
+        row.operator("lookdev.browse_for_folder",text='',icon="FILE_FOLDER")
+        
+        box.operator("lookdev.export_materials",text='Bake and Export')
+
+
+class UiProperties(bpy.types.PropertyGroup):
+    """All UI Properties"""
+    textureResolution: bpy.props.IntProperty(name="Texture Resolution", description="Resolution of the texture", default=4096)
+    fileFormat: bpy.props.EnumProperty(name="File Format", description="File format of the texture", items=[("PNG", "PNG", "Portable Network Graphics"), ("JPEG", "JPEG", "Joint Photographic Experts Group"), ("TIFF", "TIFF", "Tagged Image File Format")], default="PNG")
+    isCopyingTextures: bpy.props.BoolProperty(name='Save all textures to save location', description='Copies all image textures to save location (Keeps textures organized, since all the new baked textures will be next to the default image textures)', default=True)
+    isExportingFBX: bpy.props.BoolProperty(name="Export with FBX", description="Export the scene geometry and lights as an FBX file with all the baked textures auto-applied", default=True)
+    isDefaultExportLocation: bpy.props.BoolProperty(name="Save Next To File", description="Save the files next to the current Blender file", default=True)
+    filePath: bpy.props.StringProperty(name="Filepath", description="Directory to save files to. Default will create a subfolder called 'scene_export' in the current Blender file location.", default='')
+
+
+class BrowseForFolderOperator(bpy.types.Operator):
+    """Browse for a folder"""
+    bl_idname = "lookdev.browse_for_folder"
+    bl_label = "Browse for Folder"
     
-    fileFormat : bpy.props.EnumProperty(
-        name='File Format',
-        items=[
-            ('JPEG', 'JPEG', ''),
-            ('PNG', 'PNG', ''),
-            ('TIFF', 'TIFF', '')
-        ],
-        default='JPEG'
+    directory: bpy.props.StringProperty(
+        name="Export Directory",
+        description="Choose a directory",
+        subtype='DIR_PATH'
     )
-    textureResolution : bpy.props.IntProperty(name='Texture Resolution', default=4096)
     
+    def execute(self, context):
+        # Update the filePath property with the selected directory
+        context.scene.ui_properties.filePath = self.directory
+        return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+    
+
+class ExportMaterialsOperator(bpy.types.Operator):
+    """Export Materials"""
+    bl_idname = "lookdev.export_materials"
+    bl_label = "Save and Export?"
     
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "textureResolution")
-        layout.prop(self, "fileFormat")
-        layout.label(text="WARNING: ")
-        layout.label(text="Pressing OK saves this file,then opens a new file.")
-    
+        layout.scale_y = 1.2
+        layout.label(text='The file will save before exporting.')
+        layout.label(text='A new file will be made with the baked textures applied.')
     
     def execute(self, context):
-        print('Baking materials...')
-        materialBake.bakeAllMaterials(self.textureResolution, self.fileFormat)
-        print('Exporting FBX...')
-        fbxExport.exportVisibleMeshesAsFbx()
-        print('Done! Materials and FBX exported.')
+        props = context.scene.ui_properties
+        
+        print("Exporting materials...")
+        
+        resolution = props.textureResolution
+        fileFormat = props.fileFormat
+        isCopyingTextures = props.isCopyingTextures
+        filePath = props.filePath
+        
+        materialBake.MaterialBaker(resolution, fileFormat, isCopyingTextures, filePath)
+        
+        if props.isExportingFBX:
+            fbxExport.exportMeshesAndLightsAsFbx(filePath)
+            
         return {'FINISHED'}
     
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
-        
-    
 
 
-        
-        
 def register():
-    print("Register function called")  # Debug print
-    bpy.utils.register_class(LookdevPanel)
-    bpy.utils.register_class(LookDevBakeMaterials)
-def unregister():
-    bpy.utils.unregister_class(LookdevPanel)
-    bpy.utils.unregister_class(LookDevBakeMaterials)
-
-if __name__ == '__main__':
-    register()
+    bpy.utils.register_class(UiProperties)
+    bpy.types.Scene.ui_properties = bpy.props.PointerProperty(type=UiProperties)
     
+    bpy.utils.register_class(BrowseForFolderOperator)
+    bpy.utils.register_class(ExportMaterialsOperator)
+    bpy.utils.register_class(LookdevPanel)
+
+def unregister():
+    bpy.utils.unregister_class(UiProperties)
+    bpy.utils.unregister_class(BrowseForFolderOperator)
+    bpy.utils.unregister_class(ExportMaterialsOperator)
+    bpy.utils.unregister_class(LookdevPanel)
+
