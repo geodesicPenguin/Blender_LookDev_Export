@@ -486,6 +486,8 @@ class MaterialBaker:
         if not self.isFileFormatValid(self.fileFormat):
             raise ValueError(f"Invalid file format: {self.fileFormat}")
         
+        self.showMessage('Baking materials...', 'INFO')
+        
         self.toggleSystemConsole()
         self.saveScene()
         self.saveSceneBackup()
@@ -587,8 +589,13 @@ class MaterialBaker:
         """
         Toggles the visibility of the Blender System Console.
         Allows the user to see any bake working in the console.
+        
+        Doesn't seem to work in Blender version 4.2.2 LTS, so as a workaround, we to a try and except to see if it works.
         """
-        bpy.ops.wm.console_toggle()
+        try:
+            bpy.ops.wm.console_toggle()
+        except:
+            pass
 
     def saveScene(self):
         """
