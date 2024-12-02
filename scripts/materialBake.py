@@ -16,6 +16,7 @@ class MaterialBaker:
         """
         self.nonTextureInputs = {} # Will store data for bake inputs that are not texture images
         self.textureInputs = {} # Will store data for bake inputs that are texture images
+        self.packedMaterials = {} # Will store data for materials that are saved within Blender files, but not in a folder.
         
         self.resolution = resolution # The resolution of the bake images
         self.fileFormat = fileFormat # The file format to save the images as
@@ -139,6 +140,7 @@ class MaterialBaker:
         """
         Analyzes a single material to find image texture inputs connected to its
         Principled BSDF node. If not found, we add the channel to the data set for baking.
+        Also checks for packed textures and adds them to packedMaterials.
         
         Args:
             material: A Blender material object
@@ -149,6 +151,7 @@ class MaterialBaker:
                 - values are tuples of (node_name, output_socket_name)
         """
         textureInputs = self.textureInputs
+        packedMaterials = self.packedMaterials
         materialNodes = material.node_tree.nodes
         principledNode = next((node for node in materialNodes if node.type == 'BSDF_PRINCIPLED'), None)
         
@@ -170,10 +173,17 @@ class MaterialBaker:
                     # For all other inputs
                     if connectedNode.type != 'TEX_IMAGE':
                         channelDict[inputSocket.name] = (connectedNode.name, outputSocket.name)
-                    else: # If it does have a texture input, we add it to the texture inputs dictionary
+                    else: # If it does have a texture input
+                        # Add to texture inputs dictionary
                         if material.name not in textureInputs:
                             textureInputs[material.name] = {}   
                         textureInputs[material.name][inputSocket.name] = (connectedNode.name, outputSocket.name)
+                        
+                        # Check if texture is packed
+                        if connectedNode.image and (not connectedNode.image.filepath or connectedNode.image.packed_file):
+                            if material.name not in packedMaterials:
+                                packedMaterials[material.name] = {}
+                            packedMaterials[material.name][inputSocket.name] = connectedNode.image
             
             return channelDict
         return {}
@@ -182,6 +192,8 @@ class MaterialBaker:
         """
         Analyzes a single material to find if its Material Output node contains
         an image texture displacement input connected. If not, we add it to the data set for baking.
+        Also checks for packed textures and adds them to packedMaterials.
+        
         Args:
             material: A Blender material object
             
@@ -191,6 +203,7 @@ class MaterialBaker:
                 - values are tuples of (node_name, output_socket_name)
         """
         textureInputs = self.textureInputs
+        packedMaterials = self.packedMaterials
         
         materialNodes = material.node_tree.nodes
         outputNode = next((node for node in materialNodes if node.type == 'OUTPUT_MATERIAL'), None)
@@ -206,10 +219,22 @@ class MaterialBaker:
                 
                 if connectedNode.type == 'DISPLACEMENT':
                     # Check if Displacement node has a texture input
-                    if not any(link.from_node.type == 'TEX_IMAGE' for link in connectedNode.inputs['Height'].links):
+                    textureNode = next((link.from_node for link in connectedNode.inputs['Height'].links 
+                                      if link.from_node.type == 'TEX_IMAGE'), None)
+                    
+                    if not textureNode:
                         channelDict['Displacement'] = (connectedNode.name, outputSocket.name)
-                    else: # If it does have a texture input, we add it to the texture inputs dictionary
+                    else: # If it does have a texture input
+                        # Add to texture inputs dictionary
+                        if material.name not in textureInputs:
+                            textureInputs[material.name] = {}
                         textureInputs[material.name]['Displacement'] = (connectedNode.name, outputSocket.name)
+                        
+                        # Check if texture is packed
+                        if textureNode.image and (not textureNode.image.filepath or textureNode.image.packed_file):
+                            if material.name not in packedMaterials:
+                                packedMaterials[material.name] = {}
+                            packedMaterials[material.name]['Displacement'] = textureNode.image
                         
             return channelDict
         return {}
@@ -352,10 +377,13 @@ class MaterialBaker:
         materialName = materialName.rstrip().replace(' ', '_')
         channel = channel.replace(' ', '_')
         fileName = f"{materialName}_{channel}.{fileFormat}"
-        bakeImage.filepath_raw = os.path.join(exportDir, fileName)
+        filePath = os.path.join(exportDir, fileName)
+        bakeImage.filepath_raw = filePath
         bakeImage.file_format = fileFormat
         self.configureImageSettings(fileFormat)
         bakeImage.save()
+        
+        return filePath
 
     def configureImageSettings(self, fileFormat='PNG'):
         """
@@ -522,6 +550,10 @@ class MaterialBaker:
         if self.copyTextures:
             for materialName, textureData in channelsToCopy.items():
                 self.copyTextureToDirectory(materialName, textureData)
+                
+        # Unpack all materials AKA: Materials that are saved within Blender, but not in a folder.
+        self.unpackMaterials()
+        print('\n'*3, 'Packed materials:', self.packedMaterials, '\n'*3, sep='')
              
         if multipleUsers:
             print('\n'*3, 'Materials with multiple users:', *multipleUsers, *multipleUsers.values(), '\n', '\nIf the UVs are not identical, you may get strange results.', '\n'*3, sep='\n')
@@ -573,6 +605,30 @@ class MaterialBaker:
         # All other channels connect directly to BSDF
         elif channel in principledNode.inputs:
             links.new(bakeImageNode.outputs['Color'], principledNode.inputs[channel])
+            
+    def unpackMaterials(self):
+        """
+        Unpacks packed textures in materials and updates their file paths.
+        For each packed texture:
+        1. Saves it to the specified location
+        2. Removes the packed data
+        3. Updates the image path to point to the saved file
+        """
+        for materialName, bakeImages in self.packedMaterials.items():
+            exportMaterialDir = self.exportMaterialDirectory(materialName)
+            
+            for channel, bakeImage in bakeImages.items():
+                filePath = self.saveChannelBake(bakeImage, materialName, channel, self.fileFormat, exportMaterialDir)
+                
+                if bakeImage.packed_file:
+                    # Remove the packed file
+                    bakeImage.unpack(method='REMOVE')
+                    
+                    # Update the image path to the new location
+                    bakeImage.filepath = filePath
+                    bakeImage.reload()
+                    
+                    print(f"Unpacked and relocated texture for {materialName} - {channel} to: {filePath}")
 
     def connectBSDFToMaterialOutput(self, materialName):
         """
@@ -595,7 +651,7 @@ class MaterialBaker:
         try:
             bpy.ops.wm.console_toggle()
         except:
-            pass
+            bpy.ops.wm.debug_menu()
 
     def saveScene(self):
         """
